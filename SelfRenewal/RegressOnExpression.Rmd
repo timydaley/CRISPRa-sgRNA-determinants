@@ -1,0 +1,99 @@
+---
+title: "Mixture model regression on expression"
+author: "Timothy Daley"
+date: "10/11/2018"
+output: html_document
+---
+
+```{r cache=TRUE}
+topGeneGuides = read.table(file = "~/sgRNA/tiling/SelfRenewal/topGeneGuides.txt", header = TRUE)
+dim(topGeneGuides)
+head(topGeneGuides, 2)
+EscPerfectMatchLog2FC = read.table(file = "~/sgRNA/tiling/SelfRenewal/EscPerfectMatchLog2FC.txt", header = TRUE)
+EscPerfectMatchLog2FC = EscPerfectMatchLog2FC[-which(duplicated(EscPerfectMatchLog2FC$guide)), ]
+EscPerfectMatchLog2FC = EscPerfectMatchLog2FC[which(EscPerfectMatchLog2FC$gene %in% topGeneGuides$gene & EscPerfectMatchLog2FC$guide %in% topGeneGuides$guide), ]
+dim(EscPerfectMatchLog2FC)
+head(EscPerfectMatchLog2FC, 2)
+averageGeneExpression = read.table(file = "~/sgRNA/tiling/SelfRenewal/averageGeneExpression.txt", header = TRUE)
+topGeneGuides = data.frame(topGeneGuides, avgLog2FC = EscPerfectMatchLog2FC$SelfRenewalAvgLog2FC[match(topGeneGuides$guide, EscPerfectMatchLog2FC$guide)], EscE14GeneExpression = averageGeneExpression$avgTPM[match(topGeneGuides$gene, averageGeneExpression$gene)])
+head(topGeneGuides, 2)
+library(ggplot2)
+ggplot(topGeneGuides, aes(x = avgLog2FC)) + geom_density(aes(y = ..density..)) + theme_bw() + theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), axis.line = element_line(colour = "black"))
+library(mixtools)
+topGeneGuides2compNormalMix = mixtools::normalmixEM(topGeneGuides$avgLog2FC, k = 2, mu = c(0, 10))
+hist(topGeneGuides$avgLog2FC, breaks = 50, col = "lightgrey", probability = TRUE)
+s = seq(from = min(topGeneGuides$avgLog2FC) - 0.1, to = max(topGeneGuides$avgLog2FC) + 0.1, length = 1001)
+lines(s, topGeneGuides2compNormalMix$lambda[1]*dnorm(s, mean = topGeneGuides2compNormalMix$mu[1], sd = topGeneGuides2compNormalMix$sigma[1]) + topGeneGuides2compNormalMix$lambda[2]*dnorm(s, mean = topGeneGuides2compNormalMix$mu[2], sd = topGeneGuides2compNormalMix$sigma[2]), col = "darkviolet", lwd = 2)
+lines(s, topGeneGuides2compNormalMix$lambda[1]*dnorm(s, mean = topGeneGuides2compNormalMix$mu[1], sd = topGeneGuides2compNormalMix$sigma[1]), col = "red", lwd = 2)
+lines(s, topGeneGuides2compNormalMix$lambda[2]*dnorm(s, mean = topGeneGuides2compNormalMix$mu[2], sd = topGeneGuides2compNormalMix$sigma[2]), col = "deepskyblue", lwd = 2)
+topGeneGuides2compNormalMix$lambda
+topGeneGuides2compNormalMix$mu
+topGeneGuides2compNormalMix$sigma
+```
+
+```{r cache=TRUE, message=FALSE}
+esc.mixture.model <-'
+data {
+  int<lower=1> n_sgRNAs;
+  int<lower=1> n_genes;
+  real mu0;
+  real<lower=0> sigma0;
+  real mu1;
+  real<lower=0, upper=1> q0;
+  real x[n_sgRNAs];
+  int<lower=0, upper=n_genes> gene_ids[n_sgRNAs];
+}
+parameters {
+  real mu_g[n_genes];
+  real<lower=0, upper=1> q[n_genes];
+  real<lower=0> sigma_g;
+  real<lower=0> sigma1;
+}
+model{
+  mu_g ~ normal(mu1, sigma_g);
+  sigma_g ~ cauchy(0, 1);
+  q ~ beta(q0*4/(1 - q0), 4);
+  sigma1 ~ cauchy(0, 1);
+  for (i in 1:n_sgRNAs){
+    target += log_mix(q[gene_ids[i]], 
+                      normal_lpdf(x[i] | mu_g[gene_ids[i]], sigma1), 
+                      normal_lpdf(x[i] | mu0, sigma0)); 
+  }
+}
+'
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = 1)
+gene_ids = as.numeric(topGeneGuides$gene)
+sgRNAdata <- list(n_sgRNAs = length(topGeneGuides$avgLog2FC), n_genes = max(gene_ids), 
+                  x = topGeneGuides$avgLog2FC, gene_ids = gene_ids,
+                  mu0 = topGeneGuides2compNormalMix$mu[1], sigma0 = topGeneGuides2compNormalMix$sigma[1],
+                  q0 = topGeneGuides2compNormalMix$lambda[2],  mu1 = topGeneGuides2compNormalMix$mu[2]);
+esc.mix.stan <- stan(model_code = esc.mixture.model, data = sgRNAdata, chains = 4, iter = 4000);
+esc.mix.stan.summary = summary(esc.mix.stan, probs = c(0.1, 0.5, 0.9))$summary
+```
+
+```{r}
+esc.mix.stan.summary = data.frame(parameter = as.factor(c(paste0("mu[", levels(topGeneGuides$gene), "]"), paste0("q[", levels(topGeneGuides$gene), "]"), "sigma_g", "sigma1", "lp__")), esc.mix.stan.summary)
+rownames(esc.mix.stan.summary) = c()
+library(pander)
+pander(esc.mix.stan.summary[ ,c("parameter", "mean", "sd", "X10.", "X50.", "X90.", "Rhat")])
+x = data.frame(parameter = esc.mix.stan.summary$parameter[startsWith(sapply(esc.mix.stan.summary$parameter, toString), "q")], middle = esc.mix.stan.summary$X50.[startsWith(sapply(esc.mix.stan.summary$parameter, toString), "q")], lower = esc.mix.stan.summary$X10.[startsWith(sapply(esc.mix.stan.summary$parameter, toString), "q")], upper = esc.mix.stan.summary$X90.[startsWith(sapply(esc.mix.stan.summary$parameter, toString), "q")])
+```
+```{r}
+library(ggplot2)
+ggplot(data = x, mapping = aes(x = parameter, y = middle, ymin = lower, ymax = upper)) + geom_linerange() + geom_point(size = 2) + scale_y_discrete() + labs(y = "95% credible interval", x = " mixture parameters") +  theme(panel.grid = element_blank()) + geom_hline(yintercept = 0.33, colour = "white") + coord_flip() 
+x = data.frame(parameter = esc.mix.stan.summary$parameter[startsWith(sapply(esc.mix.stan.summary$parameter, toString), "mu")], middle = esc.mix.stan.summary$X50.[startsWith(sapply(esc.mix.stan.summary$parameter, toString), "mu")], lower = esc.mix.stan.summary$X10.[startsWith(sapply(esc.mix.stan.summary$parameter, toString), "mu")], upper = esc.mix.stan.summary$X90.[startsWith(sapply(esc.mix.stan.summary$parameter, toString), "mu")])
+ggplot(data = x, mapping = aes(x = parameter, y = middle, ymin = lower, ymax = upper)) + geom_linerange() +  geom_point(size = 2) + scale_y_discrete() + labs(y = "80% credible interval", x = "effect sizes") +  theme(panel.grid = element_blank()) + geom_hline(yintercept = 1.5, colour = "white") + coord_flip() + ylim(1, 11)
+x = data.frame(gene = factor(levels(topGeneGuides$gene)), effect_size = esc.mix.stan.summary$X50.[startsWith(sapply(esc.mix.stan.summary$parameter, toString), "mu")], mixing = esc.mix.stan.summary$X50.[startsWith(sapply(esc.mix.stan.summary$parameter, toString), "q")], geneExpression = averageGeneExpression$avgTPM[match(levels(topGeneGuides$gene), averageGeneExpression$gene)])
+ggplot(x, aes(x = mixing, y = effect_size, label = gene, fill = log(geneExpression))) + geom_point() + theme(panel.grid = element_blank()) + geom_label() + scale_fill_gradient2(low = "blue", high = "red", mid = "white", midpoint = 0)
+```
+
+```{r}
+cor(x$mixing, log(x$geneExpression))
+cor(x$effect_size, log(x$geneExpression))
+```
+
+```{r}
+
+```

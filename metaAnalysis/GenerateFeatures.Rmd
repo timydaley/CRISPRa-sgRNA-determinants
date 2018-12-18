@@ -1,0 +1,119 @@
+---
+title: "Generating features from mapped sgRNAs"
+author: "Timothy Daley"
+date: "10/10/2018"
+output: html_document
+---
+
+```{r message=FALSE}
+library(Rsamtools)
+library(GenomicFeatures)
+library(biomaRt)
+library(GenomicRanges)
+library(Repitools)
+library(chromstaR)
+library(BSgenome.Mmusculus.UCSC.mm10)
+```
+
+```{r cache=TRUE}
+bamfile = "~/sgRNA/tiling/metaAnalysis/YanxiaSeqsWithPAM.uniq.sort.bam"
+bam = scanBam(bamfile)
+bam_field = names(bam[[1]])
+table(bam[[1]]$flag)
+#function for collapsing the list of lists into a single list
+#as per the Rsamtools vignette
+.unlist <- function (x){
+  ## do.call(c, ...) coerces factor to integer, which is undesired
+  x1 <- x[[1L]]
+  if (is.factor(x1)){
+    structure(unlist(x), class = "factor", levels = levels(x1))
+  } else {
+    do.call(c, x)
+  }
+}
+#go through each BAM field and unlist
+full_list = lapply(bam_field, function(y) .unlist(lapply(bam, "[[", y)))
+#store as data frame
+bam_df = do.call("DataFrame", full_list)
+names(bam_df) <- bam_field
+## Read the file into a GRanges object
+bgr = BAM2GRanges(bamfile, 
+                  flag = scanBamFlag(isUnmappedQuery = FALSE, 
+                                     isDuplicate = FALSE), 
+                  verbose = TRUE)
+#keep original GRanges object, modify copy
+bgr.mod = bgr
+
+#if (-)ve strand, +8 to start, and +N to end make sequence length = 38
+#if (+)ve strand, +8 to end, and +N to start to make sequence length = 38
+mod_seq <- function(x){
+  for(i in 1:length(x)){
+    if(as.logical(strand(x)[i] == "-")){
+      start(x)[i] = start(x)[i] - 5
+      if(width(x)[i] != 33){
+        padding_value = 33 - width(x)[i]
+        end(x)[i] = end(x)[i] + padding_value
+      }
+    }
+    if(as.logical(strand(x)[i] == "+")){
+      end(x)[i] = end(x)[i] + 5
+      if(width(x)[i] != 33){
+        padding_value = 33 - width(x)[i]
+        start(x)[i] = start(x)[i] - padding_value
+      }
+    }
+  }
+  return(x)
+}
+
+genes = sapply(bam_df$qname, function(s) unlist(strsplit(s, ","))[2])
+guides = sapply(bam_df$qname, function(s) unlist(strsplit(s, ","))[1])
+mod_bgr = mod_seq(bgr.mod)
+seqs = getSeq(BSgenome.Mmusculus.UCSC.mm10, mod_bgr, as.character=TRUE)
+write.table(data.frame(gene = genes, seq = seqs), file = "~/sgRNA/tiling/SelfRenewal/geneTargetingGuidesSequences.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
+head(seqs)
+```
+
+```{r cache=TRUE}
+require(ggplot2)
+require(ggseqlogo)
+ggseqlogo(seqs, method = 'prob')
+```
+
+```{r cache=TRUE}
+SelfRenewalPerfectMatchLog2FcCRISPhieRmixGeneScores = read.table(file = "~/sgRNA/SelfRenewal/EscPerfectMatchLog2FcCRISPhieRmixGeneScores.txt", header = TRUE)
+topGenes = SelfRenewalPerfectMatchLog2FcCRISPhieRmixGeneScores$gene[which(SelfRenewalPerfectMatchLog2FcCRISPhieRmixGeneScores$FDR < 0.2)]
+topGeneGuides = data.frame(seq = seqs[which(genes %in% topGenes)], chr = bam_df$rname[which(genes %in% topGenes)], pos = bam_df$pos[which(genes %in% topGenes)], strand = bam_df$strand[which(genes %in% topGenes)], gene = genes[which(genes %in% topGenes)], guide = guides[which(genes %in% topGenes)])
+dim(topGeneGuides)
+write.table(topGeneGuides, file = "topGeneGuides.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
+```
+
+```{r}
+seq_char = as.character(topGeneGuides$seq)
+seq_df_splits = unlist(strsplit(seq_char, split = ""))
+seq_matrix = matrix(seq_df_splits , ncol = 33 , byrow = TRUE )
+seq_df = as.data.frame(seq_matrix)
+seq_df = seq_df[ ,-c(6, 27, 28)]
+seq.model.matrix = as.matrix(Matrix::sparse.model.matrix(~ -1 + ., data = seq_df))
+```
+
+```{r}
+ENCODEmarks = scan("~/sgRNA/tiling/SelfRenewal/marks.txt", what = character())
+#ENCODEmarksPeaks = vector(mode = "list", length = length(ENCODEmarks))
+columnNames = c("chr", "start", "end", "V4", "V5", "V6", "V7", "V8", "V9", "V10")
+overlap.matrix = mat.or.vec(nr = dim(topGeneGuides)[1], nc = length(ENCODEmarks) + 1)
+for(m in 1:length(ENCODEmarks)){
+  peaks = read.table(file = paste0("~/sgRNA/tiling/SelfRenewal/", ENCODEmarks[m]), header = FALSE, sep = "\t", stringsAsFactors = FALSE, col.names = columnNames)
+  peaks.gr = with(peaks, GenomicRanges::GRanges(chr, IRanges::IRanges(start, end)))
+  for(i in 1:dim(topGeneGuides)[1]){
+    gr = GRanges(seqnames = topGeneGuides$chr[i], 
+                 ranges = IRanges(topGeneGuides$pos[i] - 5, 
+                                  topGeneGuides$pos[i] + 5))
+    if(length(findOverlaps(gr, peaks.gr))){
+      overlap.matrix[i, m] = 1
+    }
+  }
+}
+colSums(overlap.matrix)
+
+```

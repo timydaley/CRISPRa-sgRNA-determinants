@@ -1,0 +1,163 @@
+---
+title: "Meta-Mixture-Regression"
+author: "Timothy Daley"
+date: "11/14/2018"
+output: html_document
+---
+
+The goal of this document is to do a meta-type analysis for features associated with good guide activity using a mixture model logistic regression.  First we'll combine the Neuron and Self Renewal screens.  Later we'll include more, once I figure out how to do this.
+
+```{r cache=TRUE}
+library(GenomicRanges)
+library(Biostrings)
+NeuronRegressors = read.table(file = "~/sgRNA/tiling/Neuron/NeuronBinaryFeatureMatrix.txt", header = TRUE)
+NeuronTopGeneGuides = read.table(file = "~/sgRNA/tiling/Neuron/NeuronTopGeneGuides.txt", header = TRUE)
+spacers = DNAStringSet(NeuronTopGeneGuides$guide)
+spacerGCcontent = rowSums(alphabetFrequency(spacers)[,c(2,3)]/width(spacers))
+NeuronTopGeneGuides = data.frame(NeuronTopGeneGuides, spacerGCcontent = spacerGCcontent)
+SelfRenewalRegressors = read.table(file = "~/sgRNA/tiling/SelfRenewal/SelfRenewalBinaryFeatureMatrix.txt", header = TRUE)
+SelfRenewalTopGeneGuides = read.table(file = "~/sgRNA/tiling/SelfRenewal/SelfRenewalTopGeneGuides.txt", header = TRUE)
+spacers = DNAStringSet(SelfRenewalTopGeneGuides$guide)
+spacerGCcontent = rowSums(alphabetFrequency(spacers)[,c(2,3)]/width(spacers))
+SelfRenewalTopGeneGuides = data.frame(SelfRenewalTopGeneGuides, spacerGCcontent = spacerGCcontent)
+
+hist(NeuronTopGeneGuides$log2fc, breaks = 100)
+NeuronTopGeneGuidesLog2fcMixture = mixtools::normalmixEM(NeuronTopGeneGuides$log2fc, k = 2, mu = c(0, 4), lambda = c(0.8, 0.2))
+NeuronTopGeneGuidesLog2fcMixture$mu
+NeuronTopGeneGuidesLog2fcMixture$sigma
+NeuronTopGeneGuidesLog2fcMixture$lambda
+hist(NeuronTopGeneGuides$log2fc, breaks = 50, col = "grey", main = "Neuron CRISPRa screen top hits", xlab = "log2FC", probability = TRUE)
+s = seq(from = -20, to = 20, length = 1001)
+lines(s, NeuronTopGeneGuidesLog2fcMixture$lambda[1]*dnorm(s, mean = NeuronTopGeneGuidesLog2fcMixture$mu[1], sd = NeuronTopGeneGuidesLog2fcMixture$sigma[1]), lwd = 2, col = "red")
+lines(s, NeuronTopGeneGuidesLog2fcMixture$lambda[2]*dnorm(s, mean = NeuronTopGeneGuidesLog2fcMixture$mu[2], sd = NeuronTopGeneGuidesLog2fcMixture$sigma[2]), lwd = 2, col = "deepskyblue")
+lines(s, NeuronTopGeneGuidesLog2fcMixture$lambda[1]*dnorm(s, mean = NeuronTopGeneGuidesLog2fcMixture$mu[1], sd = NeuronTopGeneGuidesLog2fcMixture$sigma[1]) + NeuronTopGeneGuidesLog2fcMixture$lambda[2]*dnorm(s, mean = NeuronTopGeneGuidesLog2fcMixture$mu[2], sd = NeuronTopGeneGuidesLog2fcMixture$sigma[2]), lwd = 2, lty = 2, col = "darkviolet")
+
+hist(SelfRenewalTopGeneGuides$log2fc, breaks = 100)
+SelfRenewalTopGeneGuidesLog2fcMixture = mixtools::normalmixEM(SelfRenewalTopGeneGuides$log2fc, k = 2, mu = c(0, 8), lambda = c(0.8, 0.2))
+SelfRenewalTopGeneGuidesLog2fcMixture$mu
+SelfRenewalTopGeneGuidesLog2fcMixture$sigma
+SelfRenewalTopGeneGuidesLog2fcMixture$lambda
+hist(SelfRenewalTopGeneGuides$log2fc, breaks = 50, col = "grey", main = "Self Renewal CRISPRa screen top hits", xlab = "log2FC", probability = TRUE)
+s = seq(from = -20, to = 20, length = 1001)
+lines(s, SelfRenewalTopGeneGuidesLog2fcMixture$lambda[1]*dnorm(s, mean = SelfRenewalTopGeneGuidesLog2fcMixture$mu[1], sd = SelfRenewalTopGeneGuidesLog2fcMixture$sigma[1]), lwd = 2, col = "red")
+lines(s, SelfRenewalTopGeneGuidesLog2fcMixture$lambda[2]*dnorm(s, mean = SelfRenewalTopGeneGuidesLog2fcMixture$mu[2], sd = SelfRenewalTopGeneGuidesLog2fcMixture$sigma[2]), lwd = 2, col = "deepskyblue")
+lines(s, SelfRenewalTopGeneGuidesLog2fcMixture$lambda[1]*dnorm(s, mean = SelfRenewalTopGeneGuidesLog2fcMixture$mu[1], sd = SelfRenewalTopGeneGuidesLog2fcMixture$sigma[1]) + SelfRenewalTopGeneGuidesLog2fcMixture$lambda[2]*dnorm(s, mean = SelfRenewalTopGeneGuidesLog2fcMixture$mu[2], sd = SelfRenewalTopGeneGuidesLog2fcMixture$sigma[2]), lwd = 2, lty = 2, col = "darkviolet")
+
+model <-'
+data {
+  int<lower=1> n_screens; // number of screens
+  int<lower=0> n_regressors; // number of regressors
+  int<lower=1> n_sgRNAs[n_screens]; // number of guides per screen
+  int<lower=1> max_n_sgRNAs; // max of n_sgRNAs
+  int<lower=1> n_genes[n_screens]; // number of genes per screen
+  int<lower=1> max_n_genes; // max of n_genes
+  int<lower=0, upper=max_n_genes> gene_ids[max_n_sgRNAs, n_screens]; // pad the vector with zeros 
+  real log2fc[max_n_sgRNAs, n_screens]; // pad these with something, like -20
+  real regressors[n_screens, max_n_sgRNAs, n_regressors]; // pad with zeros
+  real null_mean[n_screens]; // mean of null distributions
+  real null_sigma[n_screens]; //sd of null distributions
+  real mu_g_prior_mean[n_screens]; // prior mean of gene effect sizes
+  real mu_g_prior_sigma[n_screens]; // prior sd of gene effect sizes
+}
+parameters{
+  real mu_g[max_n_genes, n_screens]; //gene effect sizes, pad with zeros
+  real beta0[max_n_genes, n_screens]; // gene specific baseline mixing parameter, pad with zeros
+  real beta[n_regressors]; // regression estimates, linked across genes and screens
+  real<lower=0> sigma[n_screens]; // screen-specific guide variability
+  real<lower=0> tau; // prior on Laplace parameter on betas
+}
+transformed parameters {
+  real q[max_n_sgRNAs, n_screens];
+  for(s in 1:n_screens){
+    for(i in 1:n_sgRNAs[s]){
+      q[i, s] = beta0[gene_ids[i, s], s];
+      for(j in 1:n_regressors){
+        q[i, s] = q[i, s] + beta[j]*regressors[s, i, j];
+      }
+    }
+    if(n_sgRNAs[s] > max_n_sgRNAs){
+      for(i in (n_sgRNAs[s] + 1):max_n_sgRNAs){
+        q[i, s] = 0;
+      }
+    }
+  }
+}
+model {
+ // gene effect sizes
+  for(s in 1:n_screens){
+    for(g in 1:n_genes[s]){
+      mu_g[g, s] ~ normal(mu_g_prior_mean[s], mu_g_prior_sigma[s]);
+    }
+  }
+  // prior on gene specific variability, make it broad
+  sigma ~ normal(0, 5);
+  // prior on gene specific mixing, make it broad
+  for(s in 1:n_screens){
+    beta0[s] ~ normal(0, 5);
+  }
+  // prior on regression effects
+  beta ~ double_exponential(0, tau);
+  tau ~ cauchy(0, 1);
+  // mixture model on observations
+  for(s in 1:n_screens){
+    for(i in 1:n_sgRNAs[s]){
+      target += log_mix(1/(1 + exp(-q[i, s])),
+                        normal_lpdf(log2fc[i, s] | mu_g[gene_ids[i, s], s], sigma[s]), 
+                        normal_lpdf(log2fc[i, s] | null_mean[s], null_sigma[s]));
+    }
+  }
+}
+'
+library(rstan)
+rstan_options(auto_write = TRUE)
+options(mc.cores = 2)
+n_sgRNAs = c(dim(SelfRenewalRegressors)[1], dim(NeuronRegressors)[1])
+max_n_sgRNAs = max(n_sgRNAs)
+n_genes = c(length(unique(SelfRenewalTopGeneGuides$gene)), length(unique(NeuronTopGeneGuides$gene)))
+max_n_genes = max(n_genes)
+gene_ids = data.frame(SelfRenewal = c(as.numeric(SelfRenewalTopGeneGuides$gene), rep(0, times = max_n_sgRNAs - n_sgRNAs[1])),
+                      Neuron = c(as.numeric(NeuronTopGeneGuides$gene), rep(0, times = max_n_sgRNAs - n_sgRNAs[2])))
+SelfRenewalRegressors = data.frame(SelfRenewalRegressors, SelfRenewalTopGeneGuides$spacerGCcontent)
+NeuronRegressors = data.frame(NeuronRegressors, NeuronTopGeneGuides$spacerGCcontent)
+n_regressors = dim(NeuronRegressors)[2]
+regressors = list(SelfRenewal = matrix(0, nrow = max_n_sgRNAs, ncol = n_regressors),
+                  Neuron = matrix(0, nrow = max_n_sgRNAs, ncol = n_regressors))
+for(i in 1:dim(SelfRenewalRegressors)[1]){
+  for(j in 1:dim(SelfRenewalRegressors)[2]){
+    regressors$SelfRenewal[i, j] = SelfRenewalRegressors[i,j]
+  }
+}
+colSums(regressors$SelfRenewal)
+colSums(SelfRenewalRegressors)
+for(i in 1:dim(NeuronRegressors)[1]){
+  for(j in 1:dim(NeuronRegressors)[2]){
+    regressors$Neuron[i, j] = NeuronRegressors[i, j]
+  }
+}
+colSums(regressors$Neuron)
+colSums(NeuronRegressors)
+null_mean = c(min(SelfRenewalTopGeneGuidesLog2fcMixture$mu), min(NeuronTopGeneGuidesLog2fcMixture$mu))
+null_sigma = c(SelfRenewalTopGeneGuidesLog2fcMixture$sigma[which.min(SelfRenewalTopGeneGuidesLog2fcMixture$mu)],
+               NeuronTopGeneGuidesLog2fcMixture$sigma[which.min(NeuronTopGeneGuidesLog2fcMixture$mu)])
+log2fc = data.frame(SelfRenewal = c(SelfRenewalTopGeneGuides$log2fc, rep(-20, times = max_n_sgRNAs - n_sgRNAs[1])),
+                    Neuron = c(NeuronTopGeneGuides$log2fc, rep(-20, times = max_n_sgRNAs - n_sgRNAs[2])))
+mu_g_prior_mean = c(max(SelfRenewalTopGeneGuidesLog2fcMixture$mu), max(NeuronTopGeneGuidesLog2fcMixture$mu))
+mu_g_prior_sigma = c(SelfRenewalTopGeneGuidesLog2fcMixture$sigma[which.max(SelfRenewalTopGeneGuidesLog2fcMixture$mu)],
+               NeuronTopGeneGuidesLog2fcMixture$sigma[which.max(NeuronTopGeneGuidesLog2fcMixture$mu)])
+sgRNAdata <- list(n_screens = 2,
+                  n_regressors = n_regressors,
+                  n_sgRNAs = n_sgRNAs,
+                  max_n_sgRNAs = max_n_sgRNAs,
+                  n_genes = n_genes,
+                  max_n_genes = max_n_genes,
+                  gene_ids = gene_ids,
+                  log2fc = log2fc,
+                  regressors = regressors,
+                  null_mean = null_mean,
+                  null_sigma = null_sigma,
+                  mu_g_prior_mean = mu_g_prior_mean,   
+                  mu_g_prior_sigma = mu_g_prior_sigma)
+meta.mix.stan = stan(model_code = model, data = sgRNAdata, chains = 1, iter = 100)
+
+                  
+```

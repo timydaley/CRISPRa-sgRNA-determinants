@@ -1,0 +1,190 @@
+---
+title: "Generating features from mapped sgRNAs"
+author: "Timothy Daley"
+date: "11/14/2018"
+output: html_document
+---
+
+I mapped the 40,099 unique sgRNAs from the Self-Renewal and Neuron screens along with PAM to mm10 with bowtie2 in sensitive mode.  39,363 mapped uniquely and 736 mapped non-uniquely.  I then removed all guides that don't map uniquely using the samtools flag -q 255.  
+
+```{r message=FALSE}
+library(Rsamtools)
+library(GenomicFeatures)
+library(biomaRt)
+library(GenomicRanges)
+library(Repitools)
+library(chromstaR)
+library(BSgenome.Mmusculus.UCSC.mm10)
+```
+
+```{r cache=TRUE}
+bamfile = "~/sgRNA/tiling/metaAnalysis/YanxiaSeqsWithPAM.uniq.sort.bam"
+bam = scanBam(bamfile)
+bam_field = names(bam[[1]])
+table(bam[[1]]$flag)
+#function for collapsing the list of lists into a single list
+#as per the Rsamtools vignette
+.unlist <- function (x){
+  ## do.call(c, ...) coerces factor to integer, which is undesired
+  x1 <- x[[1L]]
+  if (is.factor(x1)){
+    structure(unlist(x), class = "factor", levels = levels(x1))
+  } else {
+    do.call(c, x)
+  }
+}
+#go through each BAM field and unlist
+full_list = lapply(bam_field, function(y) .unlist(lapply(bam, "[[", y)))
+#store as data frame
+bam_df = do.call("DataFrame", full_list)
+names(bam_df) <- bam_field
+## Read the file into a GRanges object
+bgr = BAM2GRanges(bamfile, 
+                  flag = scanBamFlag(isUnmappedQuery = FALSE, 
+                                     isDuplicate = FALSE), 
+                  verbose = TRUE)
+#keep original GRanges object, modify copy
+bgr.mod = bgr
+
+#if (-)ve strand, +10 to start and -10 to end
+#if (+)ve strand, +10 to end and -10 to start
+mod_seq <- function(x){
+  for(i in 1:length(x)){
+    if(as.logical(strand(x)[i] == "-")){
+      start(x)[i] = start(x)[i] - 10
+      end(x)[i] = end(x)[i] + 10
+    }
+    if(as.logical(strand(x)[i] == "+")){
+      end(x)[i] = end(x)[i] + 10
+      start(x)[i] = start(x)[i] - 10
+    }
+  }
+  return(x)
+}
+
+genes = sapply(bam_df$qname, function(s) unlist(strsplit(s, "-"))[2])
+guides = sapply(bam_df$qname, function(s) unlist(strsplit(s, "-"))[1])
+distance2TSS = sapply(bam_df$qname, function(s) as.numeric(unlist(strsplit(s, "-"))[3]))
+mod_bgr = mod_seq(bgr.mod)
+seqs = getSeq(BSgenome.Mmusculus.UCSC.mm10, mod_bgr, as.character=TRUE)
+write.table(data.frame(gene = genes, seq = seqs), file = "~/sgRNA/tiling/metaAnalysis/YanxiaGeneTargetingGuidesSequences.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
+head(seqs)
+```
+
+```{r cache=TRUE}
+require(ggplot2)
+require(ggseqlogo)
+ggseqlogo(seqs, method = 'prob', seq_type='dna')
+```
+
+We the PAM and the G at the start of the guide clearly.  Otherwise, it looks like all bases are well represented throughout the guide.
+
+Let's construct the binary matrices we'll use for features, first for the Self Renewal screen.
+
+```{r cache=TRUE}
+SelfRenewalPerfectMatchLog2FcCRISPhieRmixGeneScores = read.table(file = "~/sgRNA/SelfRenewal/EscPerfectMatchLog2FcCRISPhieRmixGeneScores.txt", header = TRUE)
+topGenes = SelfRenewalPerfectMatchLog2FcCRISPhieRmixGeneScores$gene[which(SelfRenewalPerfectMatchLog2FcCRISPhieRmixGeneScores$FDR < 0.2)]
+SelfRenewalTopGeneGuides = data.frame(seq = seqs[which(genes %in% topGenes)], chr = bam_df$rname[which(genes %in% topGenes)], pos = bam_df$pos[which(genes %in% topGenes)], start = start(mod_bgr)[which(genes %in% topGenes)], end = end(mod_bgr)[which(genes %in% topGenes)], strand = bam_df$strand[which(genes %in% topGenes)], gene = genes[which(genes %in% topGenes)], guide = guides[which(genes %in% topGenes)], distance2TSS = distance2TSS[which(genes %in% topGenes)])
+rownames(SelfRenewalTopGeneGuides) = c()
+dim(SelfRenewalTopGeneGuides)
+
+# sequence features
+seq_char = as.character(SelfRenewalTopGeneGuides$seq)
+seq_df_splits = unlist(strsplit(seq_char, split = ""))
+seq_matrix = matrix(seq_df_splits , ncol = 43 , byrow = TRUE )
+seq_df = as.data.frame(seq_matrix)
+# remove constant positions
+seq_df = seq_df[ ,-c(11, 32, 33)]
+seq.model.matrix = as.matrix(Matrix::sparse.model.matrix(~ -1 + ., data = seq_df))
+# epigenetic features
+ENCODEmarks = scan("~/sgRNA/tiling/metaAnalysis/ES-E14_features/marks.txt", what = character())
+columnNames = c("chr", "start", "end", "V4", "V5", "V6", "V7", "V8", "V9", "V10")
+SelfRenewal.overlap.matrix = mat.or.vec(nr = dim(SelfRenewalTopGeneGuides)[1], nc = length(ENCODEmarks) + 1)
+for(m in 1:length(ENCODEmarks)){
+  peaks = read.table(file = paste0("~/sgRNA/tiling/metaAnalysis/ES-E14_features/", ENCODEmarks[m]), header = FALSE, sep = "\t", stringsAsFactors = FALSE, col.names = columnNames)
+  peaks.gr = with(peaks, GenomicRanges::GRanges(chr, IRanges::IRanges(start, end)))
+  for(i in 1:dim(SelfRenewalTopGeneGuides)[1]){
+    gr = GRanges(seqnames = SelfRenewalTopGeneGuides$chr[i], 
+                 ranges = IRanges(SelfRenewalTopGeneGuides$start[i], 
+                                  SelfRenewalTopGeneGuides$end[i]))
+    if(length(findOverlaps(gr, peaks.gr))){
+      SelfRenewal.overlap.matrix[i, m] = 1
+    }
+  }
+}
+colSums(SelfRenewal.overlap.matrix)
+# DNase-seq: pool replicates
+DNaseRep1peaks = read.table(file = "~/sgRNA/tiling/metaAnalysis/ES-E14_features/DNase-seq-rep1.bed", header = FALSE, sep = "\t", stringsAsFactors = FALSE, col.names = columnNames)
+DNaseRep1peaks.gr = with(DNaseRep1peaks, GenomicRanges::GRanges(chr, IRanges::IRanges(start, end)))
+DNaseRep2peaks = read.table(file = "~/sgRNA/tiling/metaAnalysis/ES-E14_features/DNase-seq-rep2.bed", header = FALSE, sep = "\t", stringsAsFactors = FALSE, col.names = columnNames)
+DNaseRep2peaks.gr = with(DNaseRep2peaks, GenomicRanges::GRanges(chr, IRanges::IRanges(start, end)))
+DNaseMergedPeaks = union(DNaseRep1peaks.gr, DNaseRep2peaks.gr)
+for(i in 1:dim(SelfRenewalTopGeneGuides)[1]){
+  gr = GRanges(seqnames = SelfRenewalTopGeneGuides$chr[i], 
+               ranges = IRanges(SelfRenewalTopGeneGuides$start[i], 
+                                SelfRenewalTopGeneGuides$end[i]))
+  if(length(findOverlaps(DNaseMergedPeaks, gr))){
+    SelfRenewal.overlap.matrix[i, length(ENCODEmarks) + 1] = 1
+  }
+}
+colnames(SelfRenewal.overlap.matrix) = c(sapply(ENCODEmarks, function(s) unlist(strsplit(s, "\\."))[1]), "DNaseMerged")
+colSums(SelfRenewal.overlap.matrix)
+SelfRenewal.model.matrix = data.frame(seq.model.matrix, SelfRenewal.overlap.matrix)
+write.table(SelfRenewal.model.matrix, file = "~/sgRNA/tiling/SelfRenewal/SelfRenewalBinaryFeatureMatrix.txt", sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
+SelfRenewalLog2FC = read.table(file = "~/sgRNA/tiling/SelfRenewal/EscPerfectMatchLog2FC.txt", header = TRUE)
+SelfRenewalTopGeneGuides = data.frame(SelfRenewalTopGeneGuides, log2fc = SelfRenewalLog2FC$SelfRenewalAvgLog2FC[match(SelfRenewalTopGeneGuides$guide, SelfRenewalLog2FC$guide)])
+write.table(SelfRenewalTopGeneGuides, file = "~/sgRNA/tiling/SelfRenewal/SelfRenewalTopGeneGuides.txt", sep = "\t", quote = FALSE, col.names = TRUE, row.names = FALSE)
+```
+
+Now we'll do the same for the neuron screen.
+
+```{r cache=TRUE}
+NeuronTopGenes = c("Foxo1", "Ezh2", "Jun", "Nr2f1", "Maz", "Suz12", "Nr6a1", "Ngn1", "Nr4a1", "Klf12", "Mecom", "Rb1", "Dmrt3", "Nr3c1", "Hoxc8", "Brn2", "Sin3b", "Tcf15")
+NeuronTopGeneGuides = data.frame(seq = seqs[which(genes %in% NeuronTopGenes)], chr = bam_df$rname[which(genes %in% NeuronTopGenes)], pos = bam_df$pos[which(genes %in% NeuronTopGenes)], start = start(mod_bgr)[which(genes %in% NeuronTopGenes)], end = end(mod_bgr)[which(genes %in% NeuronTopGenes)], strand = bam_df$strand[which(genes %in% NeuronTopGenes)], gene = genes[which(genes %in% NeuronTopGenes)], guide = guides[which(genes %in% NeuronTopGenes)], distance2TSS = distance2TSS[which(genes %in% NeuronTopGenes)])
+rownames(NeuronTopGeneGuides) = c()
+dim(NeuronTopGeneGuides)
+
+# sequence features
+seq_char = as.character(NeuronTopGeneGuides$seq)
+seq_df_splits = unlist(strsplit(seq_char, split = ""))
+seq_matrix = matrix(seq_df_splits , ncol = 43 , byrow = TRUE )
+seq_df = as.data.frame(seq_matrix)
+# remove constant positions
+seq_df = seq_df[ ,-c(11, 32, 33)]
+seq.model.matrix = as.matrix(Matrix::sparse.model.matrix(~ -1 + ., data = seq_df))
+# epigenetic marks
+ENCODEmarks = scan("~/sgRNA/tiling/metaAnalysis/ES-E14_features/marks.txt", what = character())
+columnNames = c("chr", "start", "end", "V4", "V5", "V6", "V7", "V8", "V9", "V10")
+Neuron.overlap.matrix = mat.or.vec(nr = dim(NeuronTopGeneGuides)[1], nc = length(ENCODEmarks) + 1)
+for(m in 1:length(ENCODEmarks)){
+  peaks = read.table(file = paste0("~/sgRNA/tiling/metaAnalysis/ES-E14_features/", ENCODEmarks[m]), header = FALSE, sep = "\t", stringsAsFactors = FALSE, col.names = columnNames)
+  peaks.gr = with(peaks, GenomicRanges::GRanges(chr, IRanges::IRanges(start, end)))
+  for(i in 1:dim(NeuronTopGeneGuides)[1]){
+    gr = GRanges(seqnames = NeuronTopGeneGuides$chr[i], 
+                 ranges = IRanges(NeuronTopGeneGuides$start[i], 
+                                  NeuronTopGeneGuides$end[i]))
+    if(length(findOverlaps(gr, peaks.gr))){
+      Neuron.overlap.matrix[i, m] = 1
+    }
+  }
+}
+colSums(Neuron.overlap.matrix)
+# DNase-seq
+for(i in 1:dim(NeuronTopGeneGuides)[1]){
+  gr = GRanges(seqnames = NeuronTopGeneGuides$chr[i], 
+               ranges = IRanges(NeuronTopGeneGuides$start[i], 
+                                NeuronTopGeneGuides$end[i]))
+  if(length(findOverlaps(DNaseMergedPeaks, gr))){
+    Neuron.overlap.matrix[i, length(ENCODEmarks) + 1] = 1
+  }
+}
+colnames(Neuron.overlap.matrix) = c(sapply(ENCODEmarks, function(s) unlist(strsplit(s, "\\."))[1]), "DNaseMerged")
+colSums(Neuron.overlap.matrix)
+Neuron.model.matrix = data.frame(seq.model.matrix, Neuron.overlap.matrix)
+write.table(Neuron.model.matrix, file = "~/sgRNA/tiling/Neuron/NeuronBinaryFeatureMatrix.txt", sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
+
+NeuronLog2FC = read.table(file = "~/sgRNA/tiling/Neuron/NeuronPerfectMatchLog2FC.txt", header = TRUE)
+NeuronTopGeneGuides = data.frame(NeuronTopGeneGuides, log2fc = NeuronLog2FC$CD8avg[match(NeuronTopGeneGuides$guide, NeuronLog2FC$guide)])
+
+write.table(NeuronTopGeneGuides, file = "~/sgRNA/tiling/Neuron/NeuronTopGeneGuides.txt", sep = "\t", quote = FALSE, row.names = FALSE, col.names = TRUE)
+```

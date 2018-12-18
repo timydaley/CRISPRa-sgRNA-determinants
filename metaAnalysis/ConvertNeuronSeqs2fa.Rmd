@@ -1,0 +1,27 @@
+---
+title: "Convert sequences to fasta file"
+author: "Timothy Daley"
+date: "11/11/2018"
+output: html_document
+---
+
+```{r}
+guides = read.table(file = "~/sgRNA/tiling/metaAnalysis/YanxiaSeqs.txt", sep = "\t", header = TRUE)
+guides = guides[-which(guides$gene == "random"), ]
+library(seqinr);
+guides = guides[-which(duplicated(guides[ ,c("guide", "gene")])), ]
+guides = guides[-which(guides$guide %in% guides$guide[which(duplicated(guides$guide))]), ]
+
+names = paste0(guides$guide, "-", guides$gene, "-", guides$distance2TSS)
+
+write_seqs <- function(seqs, names, filename){
+	stopifnot(dim(seqs)[1] == length(names))
+	write.fasta(file.out = filename, sequences = seqs[1], names =  toString(names[1]), open = "w", nbchar = 80, as.string = TRUE)
+	if(length(names) > 1){
+	    for(i in 2:length(names)){
+	        write.fasta(file.out = filename, sequences = seqs[i], names =  toString(names[i]), open = "a", nbchar = 80, as.string = TRUE)
+	   	}
+  }
+}
+write_seqs(sapply(guides$guide, function(s) paste0(toString(s), "NGG")), names, "~/sgRNA/tiling/metaAnalysis/YanxiaSeqsWithPAM.fa")
+```

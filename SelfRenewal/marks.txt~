@@ -1,0 +1,13 @@
+CHD2.bed
+DNase-seq-rep1.bed
+DNase-seq-rep2.bed
+H3K27ac.bed
+H3K36me3.bed
+H3K4me1.bed
+H3K4me3.bed
+H3K9ac.bed
+H3K9me3.bed
+HCFC1peakOptimalIdr.bed
+MAFKpeaksOptimalIdr.bed
+ZC3H11ApeaksOptimalIdr.bed
+ZNF384peaksOptimalIdr.bed
