@@ -1,0 +1,1 @@
+The goal of this project is to apply deep neural networks to predict sgRNA activity.  To remove the bias of variable gene effect size, I won't predict the effect directly.  Instead I will predict the mixture probability.  If the gene effect size and the null distribution are known, then it will be trivial to estimate the guide log2 fold change.
